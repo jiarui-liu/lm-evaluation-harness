@@ -155,8 +155,12 @@ class LocalChatCompletion(LocalCompletionsAPI):
         verify_certificate=True,
         ca_cert_path=None,
         auth_token=None,
+        disable_seed: bool = False,
         **kwargs,
     ):
+        # Store disable_seed flag to skip sending seed parameter for models that don't support it
+        self._disable_seed = disable_seed
+
         super().__init__(
             base_url=base_url,
             tokenizer_backend=tokenizer_backend,
@@ -197,15 +201,18 @@ class LocalChatCompletion(LocalCompletionsAPI):
         stop = handle_stop_sequences(gen_kwargs.pop("until", None), eos)
         if not isinstance(stop, (list, tuple)):
             stop = [stop]
-        return {
+        output = {
             "messages": messages,
             "model": self.model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stop": stop[:4],
-            "seed": seed,
             **gen_kwargs,
         }
+        # Only include seed if not disabled (some providers like Fireworks don't support it)
+        if not getattr(self, "_disable_seed", False):
+            output["seed"] = seed
+        return output
 
     @staticmethod
     def parse_generations(outputs: Union[Dict, List[Dict]], **kwargs) -> List[str]:
@@ -285,6 +292,7 @@ class OpenAIChatCompletion(LocalChatCompletion):
         base_url="https://api.openai.com/v1/chat/completions",
         tokenizer_backend=None,
         tokenized_requests=False,
+        disable_seed: bool = False,
         **kwargs,
     ):
         if "o1" in kwargs.get("model", ""):
@@ -296,6 +304,7 @@ class OpenAIChatCompletion(LocalChatCompletion):
             base_url=base_url,
             tokenizer_backend=tokenizer_backend,
             tokenized_requests=tokenized_requests,
+            disable_seed=disable_seed,
             **kwargs,
         )
 
@@ -341,9 +350,11 @@ class OpenAIChatCompletion(LocalChatCompletion):
             "max_completion_tokens": max_tokens,
             "temperature": temperature,
             "stop": stop[:4],
-            "seed": seed,
             **gen_kwargs,
         }
+        # Only include seed if not disabled (some providers like Fireworks don't support it)
+        if not getattr(self, "_disable_seed", False):
+            output["seed"] = seed
         if (
             "o1" in self.model
             or "5" in self.model
