@@ -37,3 +37,54 @@ def build_predictions_instruct(
         ]
         for resp, doc in zip(resps, docs)
     ]
+
+
+def build_predictions_openai(
+    resps: list[list[str]], docs: list[dict]
+) -> list[list[str]]:
+    """
+    For OpenAI models that return full code in markdown blocks.
+    Extracts the code from ```python ... ``` blocks.
+    """
+    import re
+
+    def extract_code(response: str, prompt: str) -> str:
+        # Try to extract code from markdown code block
+        # Use a more robust pattern that handles various code block formats
+        pattern = r"```(?:python)?\s*\n([\s\S]*?)```"
+        matches = re.findall(pattern, response)
+
+        if matches:
+            # Find the code block that contains the function definition
+            func_match = re.search(r"def\s+(\w+)", prompt)
+            func_name = func_match.group(1) if func_match else None
+
+            for code in matches:
+                code = code.strip()
+                # If this code block contains the expected function, use it
+                if func_name and f"def {func_name}" in code:
+                    return code
+
+            # If no matching function found, use the first code block
+            code = matches[0].strip()
+            if func_name and f"def {func_name}" not in code:
+                # The code block might just contain the implementation,
+                # so prepend the prompt
+                return prompt + code
+            return code
+
+        # No code block found, try to extract function directly from response
+        func_match = re.search(r"def\s+(\w+)", prompt)
+        if func_match:
+            func_name = func_match.group(1)
+            if f"def {func_name}" in response:
+                # Find the function definition and extract it
+                func_start = response.find(f"def {func_name}")
+                # Try to find the end of the function (next function or end of response)
+                remaining = response[func_start:]
+                return remaining
+
+        # Fallback: prepend prompt to response
+        return prompt + response
+
+    return [[extract_code(r, doc["prompt"]) for r in resp] for resp, doc in zip(resps, docs)]
