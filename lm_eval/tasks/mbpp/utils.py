@@ -30,18 +30,35 @@ def pass_at_1(
 
 
 def extract_code_blocks(text: str) -> str:
-    # Pattern to match ```...``` blocks
-    pattern = r"```(?:\w+)?\n?(.*?)\n?```"
-    # (+ ```) as we add the opening "```python" to the gen_prefix
-    matches = re.findall(pattern, r"```" + text, re.DOTALL)
-    # if no matches, try to match ```...``` blocks (after removing the language)
-    if not matches:
-        text_without_lang = re.sub(r"```python", "```", text)
-        matches = re.findall(pattern, text_without_lang, re.DOTALL)
-    if not matches:
-        return ""
-    else:
-        return matches[0]
+    # Pattern to match ```python...``` or ```...``` blocks
+    pattern = r"```(?:python)?\s*\n([\s\S]*?)\n?```"
+
+    # First, try to find code blocks anywhere in the response
+    # This handles cases where model outputs reasoning before the code block
+    matches = re.findall(pattern, text, re.DOTALL)
+    if matches:
+        # Return the first code block that looks like actual code (has 'def ' or similar)
+        for match in matches:
+            if match.strip():
+                return match.strip()
+
+    # Try a more lenient pattern (no newline required after ```)
+    pattern_lenient = r"```(?:python)?\s*([\s\S]*?)```"
+    matches = re.findall(pattern_lenient, text, re.DOTALL)
+    if matches:
+        for match in matches:
+            if match.strip():
+                return match.strip()
+
+    # For Claude-style responses where gen_prefix adds opening ``` and response ends with ```
+    # The response looks like: "\ndef foo():\n    pass\n```"
+    if text.strip().endswith("```") and "```" not in text.strip()[:-3]:
+        # Only one ``` at the end, this is the closing fence
+        return text.strip()[:-3].strip()
+
+    # Last resort: if no code blocks found, return the text stripped
+    # This handles cases where the model outputs raw code without fences
+    return text.strip() if text.strip() else ""
 
 
 def build_predictions(resps: list[list[str]], docs: list[dict]) -> list[list[str]]:

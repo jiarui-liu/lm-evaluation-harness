@@ -223,12 +223,27 @@ class LocalChatCompletion(LocalCompletionsAPI):
             try:
                 tmp = [None] * len(out["choices"])
                 for choices in out["choices"]:
-                    tmp[choices["index"]] = choices["message"]["content"]
+                    content = choices["message"].get("content")
+                    # Log raw content value for debugging
+                    if content is None or content == "":
+                        eval_logger.warning(
+                            f"[parse_generations] content is {repr(content)}. "
+                            f"Message keys: {list(choices['message'].keys())}. "
+                            f"Full message: {choices['message']}"
+                        )
+                    # For reasoning models, try reasoning_content if content is null/empty
+                    if content is None or content == "":
+                        reasoning_content = choices["message"].get("reasoning_content")
+                        if reasoning_content:
+                            eval_logger.info("Using reasoning_content field instead of content")
+                            content = reasoning_content
+                    tmp[choices["index"]] = content if content is not None else ""
             except Exception as e:
                 # account for cases that generation is blocked by content filter,
                 # which is common for Azure OpenAI Service,
                 # not sure if need to account for multiple choices
                 eval_logger.warning(f"Could not parse generations: {e}")
+                eval_logger.warning(f"Raw output: {out}")
                 tmp = [""]
             res = res + tmp
         return res
@@ -335,6 +350,13 @@ class OpenAIChatCompletion(LocalChatCompletion):
         assert type(messages) is not str, (
             "chat-completions require the --apply_chat_template flag."
         )
+
+        # Strip "type" field from messages - non-standard field that some providers
+        # (e.g., Fireworks AI) reject. Safe for all providers as it's not part of OpenAI spec.
+        cleaned_messages = [
+            {k: v for k, v in msg.items() if k != "type"} for msg in messages
+        ]
+
         gen_kwargs.pop("do_sample", False)
         if "max_tokens" in gen_kwargs:
             max_tokens = gen_kwargs.pop("max_tokens")
@@ -345,7 +367,7 @@ class OpenAIChatCompletion(LocalChatCompletion):
         if not isinstance(stop, (list, tuple)):
             stop = [stop]
         output = {
-            "messages": messages,
+            "messages": cleaned_messages,
             "model": self.model,
             "max_completion_tokens": max_tokens,
             "temperature": temperature,
@@ -363,6 +385,12 @@ class OpenAIChatCompletion(LocalChatCompletion):
         ):
             output.pop("stop")
             output["temperature"] = 1
+            # Log payload for reasoning models to debug empty responses
+            eval_logger.warning(
+                f"[reasoning model] Sending payload: model={output.get('model')}, "
+                f"max_completion_tokens={output.get('max_completion_tokens')}, "
+                f"temperature={output.get('temperature')}"
+            )
         return output
 
 

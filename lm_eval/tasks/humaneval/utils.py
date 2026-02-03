@@ -1,3 +1,5 @@
+import re
+
 import evaluate as hf_evaluate
 
 
@@ -30,16 +32,26 @@ def build_predictions(resps: list[list[str]], docs: list[dict]) -> list[list[str
 def build_predictions_instruct(
     resps: list[list[str]], docs: list[dict]
 ) -> list[list[str]]:
+    def extract_code(r: str) -> str:
+        # Handle responses that include markdown code blocks (GPT-4o, Gemini style)
+        if r.strip().startswith("```"):
+            # Extract code from within the code block
+            pattern = r"```(?:python)?\s*\n?([\s\S]*?)```"
+            matches = re.findall(pattern, r)
+            if matches:
+                return matches[0].strip()
+        # Handle responses without code blocks (Claude style) - truncate at closing ```
+        if r.find("```") != -1:
+            return r[: r.find("```")]
+        return r
+
     return [
-        [
-            doc["prompt"] + (r if r.find("```") == -1 else r[: r.find("```")])
-            for r in resp
-        ]
+        [doc["prompt"] + extract_code(r) for r in resp]
         for resp, doc in zip(resps, docs)
     ]
 
 
-def build_predictions_openai(
+def build_predictions_chat(
     resps: list[list[str]], docs: list[dict]
 ) -> list[list[str]]:
     """

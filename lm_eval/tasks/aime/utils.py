@@ -5,15 +5,9 @@ from typing import Dict, List
 def process_results(doc: dict, results: List[str]) -> Dict[str, int]:
     retval = 0
     response = results[0]
+    answer = None
 
-    # Try to extract answer from $...$ format first
-    indices = [pos for pos, char in enumerate(response) if char == "$"]
-    if len(indices) <= 1:
-        answer = response
-    else:
-        answer = response[indices[0] + 1 : indices[-1]]
-
-    # Extract from \\boxed{} if present
+    # Priority 1: Extract from \\boxed{} if present (most reliable)
     boxed_answer = last_boxed_only_string(response)
     if boxed_answer is not None:
         try:
@@ -22,6 +16,43 @@ def process_results(doc: dict, results: List[str]) -> Dict[str, int]:
                 answer = boxed_content
         except (AssertionError, IndexError):
             pass
+
+    # Priority 2: If no boxed answer, try to find the last integer in the response
+    # AIME answers are always integers between 0-999
+    if answer is None:
+        # First, try to find the last standalone integer in the final portion of the response
+        # This handles cases like "Sum = $21 + 49 = 70$." where we want "70"
+        last_portion = response[-1000:] if len(response) > 1000 else response
+
+        # Look for the last "= {number}" pattern (handles "= 70$." or "= 70." or "= 70\n")
+        equals_matches = re.findall(r'=\s*(\d+)(?:\s*[.$!?\n]|\s*$)', last_portion)
+        if equals_matches:
+            answer = equals_matches[-1]
+
+        # If no "= number" pattern, look for keyword patterns
+        if answer is None:
+            # Look for "answer is 70", "remainder is 16", "sum is 70" etc.
+            keyword_matches = re.findall(
+                r'(?:answer|result|remainder|sum|total|value|difference|number)\s+(?:is|=|:)?\s*(\d+)',
+                last_portion, re.IGNORECASE
+            )
+            if keyword_matches:
+                answer = keyword_matches[-1]
+
+        # Final fallback: find the last standalone integer in the last 500 chars
+        if answer is None:
+            final_portion = response[-500:] if len(response) > 500 else response
+            numbers = re.findall(r'\b(\d+)\b', final_portion)
+            if numbers:
+                answer = numbers[-1]
+
+    # Priority 3: Original fallback - extract from $...$ format
+    if answer is None:
+        indices = [pos for pos, char in enumerate(response) if char == "$"]
+        if len(indices) <= 1:
+            answer = response
+        else:
+            answer = response[indices[0] + 1 : indices[-1]]
 
     # Check if answer matches target
     answer_key = next(k for k in doc.keys() if k.lower() == "answer")

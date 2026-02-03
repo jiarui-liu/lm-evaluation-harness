@@ -497,8 +497,10 @@ class TemplateAPI(TemplateLM):
         cache_keys: list = None,
         ctxlens: Optional[List[int]] = None,
         gen_kwargs: Optional[Dict] = None,
+        _null_retry_count: int = 0,
         **kwargs,
     ) -> Union[List[str], List[Tuple[float, bool]], None]:
+        MAX_NULL_CONTENT_RETRIES = 3
         # !!! Copy: shared dict for each request, need new object !!!
         gen_kwargs = copy.deepcopy(gen_kwargs)
         payload = self._create_payload(
@@ -536,6 +538,29 @@ class TemplateAPI(TemplateLM):
                     ctxlens=ctxlens,
                 )
             )
+            # Retry if API returned null/empty content (up to MAX_NULL_CONTENT_RETRIES times)
+            if generate and answers and all(a is None or a == "" for a in answers):
+                if _null_retry_count < MAX_NULL_CONTENT_RETRIES:
+                    eval_logger.warning(
+                        f"API returned null/empty content. Retrying ({_null_retry_count + 1}/{MAX_NULL_CONTENT_RETRIES})..."
+                    )
+                    sem.release()
+                    acquired = False
+                    return await self.amodel_call(
+                        session=session,
+                        sem=sem,
+                        messages=messages,
+                        generate=generate,
+                        cache_keys=cache_keys,
+                        ctxlens=ctxlens,
+                        gen_kwargs=gen_kwargs,
+                        _null_retry_count=_null_retry_count + 1,
+                        **kwargs,
+                    )
+                else:
+                    eval_logger.warning(
+                        f"API returned null/empty content after {MAX_NULL_CONTENT_RETRIES} retries. Giving up."
+                    )
             if cache_keys:
                 for res, cache in zip(answers, cache_keys):
                     self.cache_hook.add_partial(cache_method, cache, res)
@@ -753,22 +778,34 @@ class TemplateAPI(TemplateLM):
                         )
 
                 req = encodings_list if self.tokenized_requests else contexts
-                outputs = retry(
-                    stop=stop_after_attempt(self.max_retries),
-                    wait=wait_exponential(multiplier=0.5, min=1, max=10),
-                    reraise=True,
-                )(self.model_call)(
-                    messages=req,
-                    generate=True,
-                    gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
-                )
-                for generated_text, context in zip(
-                    self.parse_generations(
+                MAX_NULL_CONTENT_RETRIES = 3
+                for _null_retry_count in range(MAX_NULL_CONTENT_RETRIES + 1):
+                    outputs = retry(
+                        stop=stop_after_attempt(self.max_retries),
+                        wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                        reraise=True,
+                    )(self.model_call)(
+                        messages=req,
+                        generate=True,
+                        gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                    )
+                    parsed_results = self.parse_generations(
                         outputs=outputs,
                         contexts=contexts,
-                    ),
-                    contexts,
-                ):
+                    )
+                    # Retry if all results are null/empty
+                    if all(r is None or r == "" for r in parsed_results):
+                        if _null_retry_count < MAX_NULL_CONTENT_RETRIES:
+                            eval_logger.warning(
+                                f"API returned null/empty content. Retrying ({_null_retry_count + 1}/{MAX_NULL_CONTENT_RETRIES})..."
+                            )
+                            continue
+                        else:
+                            eval_logger.warning(
+                                f"API returned null/empty content after {MAX_NULL_CONTENT_RETRIES} retries. Giving up."
+                            )
+                    break
+                for generated_text, context in zip(parsed_results, contexts):
                     # Always append to res to maintain the correct number of items
                     # even if generation failed (generated_text is None)
                     if generated_text is None:

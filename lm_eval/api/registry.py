@@ -223,6 +223,15 @@ class Registry(Generic[T]):
                 ):
                     self._objs[alias] = target
                     return
+                # allow re-registration of the same class (same module:name)
+                # this can happen when running parallel processes that import the same module
+                if (
+                    isinstance(current, type)
+                    and isinstance(target, type)
+                    and current.__module__ == target.__module__
+                    and current.__name__ == target.__name__
+                ):
+                    return  # skip duplicate registration
                 raise ValueError(
                     f"{self._name!r} alias '{alias}' already registered ("
                     f"existing={current}, new={target})"
