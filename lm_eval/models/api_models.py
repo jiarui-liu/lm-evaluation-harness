@@ -780,15 +780,23 @@ class TemplateAPI(TemplateLM):
                 req = encodings_list if self.tokenized_requests else contexts
                 MAX_NULL_CONTENT_RETRIES = 3
                 for _null_retry_count in range(MAX_NULL_CONTENT_RETRIES + 1):
-                    outputs = retry(
-                        stop=stop_after_attempt(self.max_retries),
-                        wait=wait_exponential(multiplier=0.5, min=1, max=10),
-                        reraise=True,
-                    )(self.model_call)(
-                        messages=req,
-                        generate=True,
-                        gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
-                    )
+                    try:
+                        outputs = retry(
+                            stop=stop_after_attempt(self.max_retries),
+                            wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                            reraise=True,
+                        )(self.model_call)(
+                            messages=req,
+                            generate=True,
+                            gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                        )
+                    except Exception as e:
+                        eval_logger.warning(
+                            f"API request failed after {self.max_retries} retries: {e}. "
+                            "Storing empty response and continuing to next example."
+                        )
+                        parsed_results = [""] * len(contexts)
+                        break
                     parsed_results = self.parse_generations(
                         outputs=outputs,
                         contexts=contexts,
@@ -843,16 +851,23 @@ class TemplateAPI(TemplateLM):
                         )
 
                 req = encodings_list if self.tokenized_requests else contexts
-                results = itertools.chain.from_iterable(
-                    asyncio.run(
-                        self.get_batched_requests(
-                            req,
-                            cache_keys=[(ctx, all_gen_kwargs[0]) for ctx in contexts],
-                            generate=True,
-                            gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                try:
+                    results = itertools.chain.from_iterable(
+                        asyncio.run(
+                            self.get_batched_requests(
+                                req,
+                                cache_keys=[(ctx, all_gen_kwargs[0]) for ctx in contexts],
+                                generate=True,
+                                gen_kwargs=copy.deepcopy(all_gen_kwargs[0]),
+                            )
                         )
                     )
-                )
+                except Exception as e:
+                    eval_logger.warning(
+                        f"Async API request failed: {e}. "
+                        "Storing empty responses and continuing to next batch."
+                    )
+                    results = [""] * len(contexts)
                 # Convert None values to empty strings to maintain consistency
                 for r in results:
                     if r is None:
