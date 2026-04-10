@@ -231,12 +231,17 @@ class LocalChatCompletion(LocalCompletionsAPI):
                             f"Message keys: {list(choices['message'].keys())}. "
                             f"Full message: {choices['message']}"
                         )
-                    # For reasoning models, try reasoning_content if content is null/empty
+                    # For reasoning models, try reasoning_content or reasoning if content is null/empty
                     if content is None or content == "":
                         reasoning_content = choices["message"].get("reasoning_content")
+                        if not reasoning_content:
+                            reasoning_content = choices["message"].get("reasoning")
                         if reasoning_content:
-                            eval_logger.info("Using reasoning_content field instead of content")
+                            eval_logger.info("Using reasoning_content/reasoning field instead of content")
                             content = reasoning_content
+                    # Strip inline thinking tokens (e.g. nemotron-nano puts <think>...</think> in content)
+                    if content and "</think>" in content:
+                        content = content.split("</think>", 1)[1].strip()
                     tmp[choices["index"]] = content if content is not None else ""
             except Exception as e:
                 # account for cases that generation is blocked by content filter,
@@ -366,31 +371,41 @@ class OpenAIChatCompletion(LocalChatCompletion):
         stop = handle_stop_sequences(gen_kwargs.pop("until", ["<|endoftext|>"]), eos)
         if not isinstance(stop, (list, tuple)):
             stop = [stop]
+        # Filter out whitespace-only stop sequences - Anthropic rejects them
+        stop = [s for s in stop if s and s.strip()]
         output = {
             "messages": cleaned_messages,
             "model": self.model,
             "max_completion_tokens": max_tokens,
             "temperature": temperature,
-            "stop": stop[:4],
             **gen_kwargs,
         }
+        if stop:
+            output["stop"] = stop[:4]
         # Only include seed if not disabled (some providers like Fireworks don't support it)
         if not getattr(self, "_disable_seed", False):
             output["seed"] = seed
-        if (
-            "o1" in self.model
-            or "5" in self.model
-            or "o3" in self.model
-            or "o4" in self.model
-        ):
-            output.pop("stop")
+        # Models with inline thinking (e.g. nemotron-nano) need repetition_penalty
+        # to avoid degeneration loops, and temperature > 0
+        if "nemotron" in self.model.lower():
+            output["temperature"] = 1.0
+            output["repetition_penalty"] = 1.1
+        # Azure gpt-5.2-codex requires newer api_version for Responses API
+        # LiteLLM proxy forwards api_version from the request body
+        if "codex" in self.model.lower() and "azure" in self.model.lower():
+            output["api_version"] = "2025-03-01-preview"
+        # Reasoning models: remove stop sequences and set temperature=1
+        # Match specific model families, not broad substrings
+        model_lower = self.model.lower()
+        is_reasoning = (
+            "gpt-5" in model_lower    # GPT-5, GPT-5.2, GPT-5.2-codex
+            or "/o1" in model_lower   # o1, o1-mini, o1-preview
+            or "/o3" in model_lower   # o3, o3-mini
+            or "/o4" in model_lower   # o4-mini
+        )
+        if is_reasoning:
+            output.pop("stop", None)
             output["temperature"] = 1
-            # Log payload for reasoning models to debug empty responses
-            eval_logger.warning(
-                f"[reasoning model] Sending payload: model={output.get('model')}, "
-                f"max_completion_tokens={output.get('max_completion_tokens')}, "
-                f"temperature={output.get('temperature')}"
-            )
         return output
 
 

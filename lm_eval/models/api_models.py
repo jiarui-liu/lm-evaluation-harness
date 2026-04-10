@@ -563,11 +563,13 @@ class TemplateAPI(TemplateLM):
                     )
             if cache_keys:
                 for res, cache in zip(answers, cache_keys):
-                    self.cache_hook.add_partial(cache_method, cache, res)
+                    # Only cache non-empty responses to avoid persisting failures
+                    if res is not None and res != "":
+                        self.cache_hook.add_partial(cache_method, cache, res)
             return answers
         # If the retries also fail
         except BaseException as e:
-            eval_logger.error(f"Exception:{repr(e)}, {outputs}, retrying.")
+            eval_logger.error(f"Exception:{repr(e)}, retrying.")
             raise e
         finally:
             if acquired:
@@ -613,16 +615,28 @@ class TemplateAPI(TemplateLM):
         ) as session:
             retry_: Callable[..., Awaitable[Any]] = retry(
                 stop=stop_after_attempt(self.max_retries),
-                wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                wait=wait_exponential(multiplier=1, min=1, max=10),
                 reraise=True,
                 before_sleep=lambda retry_state: eval_logger.info(
                     f"Retry attempt {retry_state.attempt_number}"
                 ),
             )(self.amodel_call)
+
+            # Wrap each call to catch exceptions per-request, so one failed
+            # request (e.g. content filter 400) doesn't poison the entire batch
+            async def safe_call(**call_kwargs):
+                try:
+                    return await retry_(**call_kwargs)
+                except Exception as e:
+                    eval_logger.warning(
+                        f"Async task failed after retries: {e}. Returning empty response."
+                    )
+                    return [""]
+
             # Create tasks for each batch of request
             tasks = [
                 asyncio.create_task(
-                    retry_(
+                    safe_call(
                         session=session,
                         sem=sem,
                         messages=message,
@@ -673,7 +687,7 @@ class TemplateAPI(TemplateLM):
 
                 outputs = retry(
                     stop=stop_after_attempt(self.max_retries),
-                    wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                    wait=wait_exponential(multiplier=1, min=1, max=10),
                     reraise=True,
                 )(self.model_call)(messages=inputs, generate=False)
                 if isinstance(outputs, dict):
@@ -783,7 +797,7 @@ class TemplateAPI(TemplateLM):
                     try:
                         outputs = retry(
                             stop=stop_after_attempt(self.max_retries),
-                            wait=wait_exponential(multiplier=0.5, min=1, max=10),
+                            wait=wait_exponential(multiplier=1, min=1, max=10),
                             reraise=True,
                         )(self.model_call)(
                             messages=req,
@@ -824,8 +838,8 @@ class TemplateAPI(TemplateLM):
                     else:
                         res.append(generated_text)
 
-                    # partial caching only for successful generations
-                    if generated_text is not None and context is not None:
+                    # partial caching only for successful non-empty generations
+                    if generated_text is not None and generated_text != "" and context is not None:
                         self.cache_hook.add_partial(
                             "generate_until",
                             (context, all_gen_kwargs[0]),
@@ -877,6 +891,19 @@ class TemplateAPI(TemplateLM):
                         res.append("")
                     else:
                         res.append(r)
+
+        # Debug: check for length mismatch before reordering
+        expected_len = len(re_ord._reorder_indices)
+        if len(res) != expected_len:
+            eval_logger.warning(
+                f"Result length mismatch in generate_until: "
+                f"got {len(res)} results but expected {expected_len} "
+                f"(reorder_indices). Truncating/padding to match."
+            )
+            if len(res) > expected_len:
+                res = res[:expected_len]
+            else:
+                res.extend([""] * (expected_len - len(res)))
 
         return re_ord.get_original(res)
 

@@ -305,9 +305,10 @@ class CachingLM:
 
                 res[resptr] = r
 
-                # caching
-                hsh = hash_args(attr, req.args)
-                self.dbdict[hsh] = r
+                # caching - skip empty/failed responses to avoid persisting failures
+                if r is not None and r != "":
+                    hsh = hash_args(attr, req.args)
+                    self.dbdict[hsh] = r
             self.dbdict.commit()
 
             return res

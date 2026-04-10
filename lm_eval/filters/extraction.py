@@ -218,6 +218,9 @@ class MultiChoiceRegexFilter(RegexFilter):
                 rf":[\s]*({without_paren_fallback_regex})"
             )
 
+            # Regex for \boxed{X} answers (common in reasoning models like DeepSeek)
+            boxed_regex = re.compile(r"\\boxed\{([A-Z])\}")
+
             filtered = []
             for resp in r:
                 match = find_match(self.regex, resp)
@@ -229,6 +232,12 @@ class MultiChoiceRegexFilter(RegexFilter):
                         match = find_match(
                             without_paren_fallback_regex, resp, without_paren_to_target
                         )
+                # Check for \boxed{X} - if present, prefer it as the final answer
+                # since models that use \boxed{} put their definitive answer there
+                if isinstance(resp, str):
+                    boxed_match = boxed_regex.findall(resp)
+                    if boxed_match:
+                        match = f"({boxed_match[-1]})"
                 if not match:
                     match = self.fallback
                 filtered.append(match)
